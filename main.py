@@ -8,6 +8,7 @@ import docx
 import io
 import json
 import os
+import re
 
 app = FastAPI(title="Aishka API")
 security = HTTPBasic()
@@ -57,32 +58,46 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         return {"message": "Файл порожній."}
 
     blocks = []
-    current_title = ""
+    current_title = "Загальна інформація"
     current_body = []
     
     for text_part in raw_blocks:
+        text_part = text_part.strip()
+        if not text_part:
+            continue
+            
         words = text_part.split()
-        # Нове правило: ігноруємо рядки з двокрапкою та списки
-        is_list_item = text_part.lstrip().startswith(('-', '•', '*', '1', '2', '3', '4', '5', '6', '7', '8', '9'))
         
-        if len(words) < 15 and not text_part.endswith(':') and not is_list_item:
+        # 1. Перевірка на розділові знаки в кінці (звичайні речення)
+        ends_with_punct = text_part.endswith(('.', ',', ';', ':'))
+        # 2. Перевірка на списки
+        is_list = text_part.startswith(('-', '•', '*', '–', '+')) or re.match(r"^\d+[\)\\]", text_part)
+        
+        # Розумна логіка заголовків
+        is_header = False
+        if len(words) < 12 and not is_list:
+            if not ends_with_punct:
+                is_header = True
+            elif text_part.isupper():
+                is_header = True
+            elif len(words) <= 4: # Дуже короткі рядки типу "1. Вступ."
+                is_header = True
+                
+        if is_header:
             if current_body:
-                title_str = f"<b>📌 {current_title}</b>\n\n" if current_title else ""
-                blocks.append(title_str + "\n\n".join(current_body))
-                current_title = text_part
+                blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
                 current_body = []
-            else:
-                if current_title:
-                    current_title += " " + text_part
-                else:
-                    current_title = text_part
+            current_title = text_part
         else:
             current_body.append(text_part)
             
-    if current_title or current_body:
-        title_str = f"<b>📌 {current_title}</b>\n\n" if current_title else ""
-        if current_body:
-            blocks.append(title_str + "\n\n".join(current_body))
+            # Щоб ШІ не плутався у величезних текстах, ріжемо їх на шматки по ~250 слів
+            if sum(len(p.split()) for p in current_body) > 250:
+                blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
+                current_body = []
+
+    if current_body or (not blocks and current_title):
+        blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
 
     topics_text = blocks
     
@@ -92,7 +107,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} тем. Списки обробляються коректно."}
+    return {"message": f"Успішно! Збережено {len(blocks)} покращених тем."}
 
 @app.post("/ask")
 def ask_question(data: dict):
@@ -106,44 +121,52 @@ def ask_question(data: dict):
         is_short = "коротк" in q_lower or "стисл" in q_lower
         is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
         
-        search_query = question_text
-        if len(question_text.split()) <= 3 and last_question:
-            search_query = f"{last_question} {question_text}"
+        # Вирізаємо слова-команди з пошуку, щоб вони не збивали алгоритм TF-IDF
+        search_query = re.sub(r'(?i)(коротко|стисло|детально|розгорнуто|все про)', '', question_text).strip()
+        if not search_query:
+            search_query = question_text
+            
+        if len(search_query.split()) <= 3 and last_question:
+            search_query = f"{last_question} {search_query}"
         
         if not is_short and not is_long and len(question_text.split()) > 2:
             last_question = question_text
-        
-        for block in topics_text:
-            first_line = block.split('\n')[0].lower()
-            if q_lower in first_line:
-                return {"answer": block}
 
+        best_match_idx = -1
+        best_score = 0
+        
         if topics_vectors is not None and len(topics_text) > 0:
             query_vec = vectorizer.transform([search_query])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
             
+            # БОНУС: Якщо ШІ знаходить точний збіг фрази із запиту в тексті, він одразу видає цей блок
+            for i, block in enumerate(topics_text):
+                if search_query.lower() in block.lower():
+                    similarities[i] += 0.5 
+                    
             best_match_idx = similarities.argmax()
-            score = similarities[best_match_idx]
+            best_score = similarities[best_match_idx]
+
+        if best_score > 0.05 and best_match_idx != -1:
+            full_topic = topics_text[best_match_idx]
+            parts = full_topic.split('\n\n')
+            title = parts[0]
+            paragraphs = [p.strip() for p in parts[1:] if p.strip()]
             
-            if score > 0.02:
-                full_topic = topics_text[best_match_idx]
-                parts = full_topic.split('\n\n')
-                title = parts[0]
-                paragraphs = [p.strip() for p in parts[1:] if p.strip()]
-                
-                if not paragraphs:
-                    return {"answer": full_topic}
-                
-                if is_short:
-                    first_sentence = paragraphs[0].split('.')[0] + "."
-                    return {"answer": f"{title}\n\n{first_sentence}"}
-                elif is_long:
-                    return {"answer": full_topic}
-                else:
-                    preview = "\n\n".join(paragraphs[:2])
-                    if len(paragraphs) > 2:
-                        preview += "\n\n<i>...у цьому розділі є ще інформація. Додай слово 'детально' до запиту, щоб побачити весь текст.</i>"
-                    return {"answer": f"{title}\n\n{preview}"}
+            if not paragraphs:
+                return {"answer": full_topic}
+            
+            if is_short:
+                first_p = paragraphs[0]
+                first_sentence = first_p.split('.')[0] + "." if '.' in first_p else first_p
+                return {"answer": f"{title}\n\n{first_sentence}"}
+            elif is_long:
+                return {"answer": full_topic}
+            else:
+                preview = "\n\n".join(paragraphs[:2])
+                if len(paragraphs) > 2:
+                    preview += "\n\n<i>...у цьому розділі є ще інформація. Додай слово 'детально', щоб побачити весь текст.</i>"
+                return {"answer": f"{title}\n\n{preview}"}
 
         try:
             results = DDGS().text(search_query, max_results=1)
