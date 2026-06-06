@@ -88,7 +88,7 @@ def ask_question(data: dict):
     try:
         question_text = data.get("question", "")
         
-        # 1. Шукаємо в конспекті (через математичну подібність)
+        # 1. Шукаємо в конспекті
         if topics_vectors is not None and len(topics_text) > 0:
             query_vec = vectorizer.transform([question_text])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
@@ -96,15 +96,26 @@ def ask_question(data: dict):
             best_match_idx = similarities.argmax()
             score = similarities[best_match_idx]
             
-            # Поріг збігу (10% ключових слів)
             if score > 0.1:
-                return {"answer": topics_text[best_match_idx]}
+                raw_answer = topics_text[best_match_idx]
+                
+                # Розділяємо текст: все, що до першого відступу - це заголовок
+                parts = raw_answer.split('\n\n', 1)
+                
+                if len(parts) == 2:
+                    # Робимо заголовок жирним і додаємо шпильку
+                    formatted_answer = f"<b>📌 {parts[0].strip()}</b>\n\n{parts[1].strip()}"
+                else:
+                    formatted_answer = raw_answer
+                    
+                return {"answer": formatted_answer}
 
         # 2. Якщо немає в конспекті - йдемо в інтернет
         results = DDGS().text(question_text, max_results=1)
         if results:
             web_answer = results[0]['body']
-            return {"answer": f"🌐 Знайдено в інтернеті: {web_answer}"}
+            # Тут теж додаємо жирний шрифт для краси
+            return {"answer": f"🌐 <b>Знайдено в інтернеті:</b>\n\n{web_answer}"}
             
         return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
         
