@@ -103,15 +103,11 @@ def ask_question(data: dict):
         if not question_text:
             return {"answer": "Порожній запит."}
         
+        # Перевіряємо, яку відповідь хоче користувач
         q_lower = question_text.lower()
+        is_short = "коротк" in q_lower or "стисл" in q_lower
+        is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
         
-        # 1. Пріоритет: точний пошук лише у ЗАГОЛОВКАХ конспекту
-        for block in topics_text:
-            first_line = block.split('\n')[0].lower()
-            if q_lower in first_line:
-                return {"answer": block}
-
-        # 2. Розумний пошук по всьому тексту
         if topics_vectors is not None and len(topics_text) > 0:
             query_vec = vectorizer.transform([question_text])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
@@ -119,10 +115,33 @@ def ask_question(data: dict):
             best_match_idx = similarities.argmax()
             score = similarities[best_match_idx]
             
-            if score > 0.02:
-                return {"answer": topics_text[best_match_idx]}
+            if score > 0.05:
+                base_chunk = topics_text[best_match_idx]
+                
+                # 1. Якщо просять КОРОТКО (видаємо лише перше речення)
+                if is_short:
+                    parts = base_chunk.split('\n\n', 1)
+                    if len(parts) > 1:
+                        first_sentence = parts[1].split('.')[0] + "."
+                        return {"answer": f"{parts[0]}\n\n{first_sentence}"}
+                    return {"answer": base_chunk}
+                    
+                # 2. Якщо просять ДЕТАЛЬНО (додаємо ще 2 абзаци з цієї ж теми)
+                elif is_long:
+                    answer = base_chunk
+                    parts = base_chunk.split('\n\n', 1)
+                    title = parts[0] if len(parts) > 1 else ""
+                    
+                    for i in range(best_match_idx + 1, min(len(topics_text), best_match_idx + 3)):
+                        next_chunk = topics_text[i]
+                        if title and next_chunk.startswith(title):
+                            next_body = next_chunk.split('\n\n', 1)[1]
+                            answer += f"\n\n{next_body}"
+                    return {"answer": answer}
+                    
+                # 3. СТАНДАРТНО (один абзац)
+                return {"answer": base_chunk}
 
-        # 3. Інтернет
         try:
             results = DDGS().text(question_text, max_results=1)
             if results:
