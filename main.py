@@ -39,51 +39,44 @@ async def serve_frontend():
     except FileNotFoundError:
         return {"error": "Файл index.html не знайдено"}
 
-@app.post("/upload")
-async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_admin)):
-    global topics_text, topics_vectors
-    content = await file.read()
-    
-    if file.filename.endswith('.docx'):
-        doc = docx.Document(io.BytesIO(content))
-        raw_blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    else:
-        text = content.decode("utf-8")
-        raw_blocks = [block.strip() for block in text.split('\n') if block.strip()]
-    
-    if not raw_blocks:
-        return {"message": "Файл порожній."}
-
-    blocks = []
-    current_block = ""
-    
-    for text_part in raw_blocks:
-        words = text_part.split()
-        # Якщо рядок короткий (менше 12 слів), робимо його новим заголовком
-        if len(words) < 12:
-            if current_block:
-                blocks.append(current_block.strip())
-            current_block = f"<b>📌 {text_part}</b>\n\n"
-        else:
-            # Всі наступні абзаци приклеюємо до поточного заголовку
-            if not current_block:
-                current_block = text_part + "\n"
-            else:
-                current_block += text_part + "\n"
-            
-    if current_block:
-        blocks.append(current_block.strip())
-
-    # Очищаємо стару базу при новому завантаженні, щоб не було дублів старих обрізаних текстів
-    topics_text = blocks
-    
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(topics_text, f, ensure_ascii=False, indent=4)
+@app.post("/ask")
+def ask_question(data: dict):
+    try:
+        question_text = data.get("question", "").strip()
+        if not question_text:
+            return {"answer": "Порожній запит."}
         
-    if len(topics_text) > 0:
-        topics_vectors = vectorizer.fit_transform(topics_text)
-    
-    return {"message": f"Успішно! Збережено {len(blocks)} повноцінних тем."}
+        # 1. Бронебійний пошук (якщо слова із запиту точно є в тексті конспекту)
+        q_lower = question_text.lower()
+        for block in topics_text:
+            if q_lower in block.lower():
+                return {"answer": block}
+
+        # 2. Розумний пошук (якщо слова трохи змінені)
+        if topics_vectors is not None and len(topics_text) > 0:
+            query_vec = vectorizer.transform([question_text])
+            similarities = cosine_similarity(query_vec, topics_vectors)[0]
+            
+            best_match_idx = similarities.argmax()
+            score = similarities[best_match_idx]
+            
+            # Знизили поріг з 0.1 до 0.02
+            if score > 0.02:
+                return {"answer": topics_text[best_match_idx]}
+
+        # 3. Інтернет
+        try:
+            results = DDGS().text(question_text, max_results=1)
+            if results:
+                web_answer = results[0]['body']
+                return {"answer": f"🌐 <b>Знайдено в інтернеті:</b>\n<br>{web_answer}"}
+        except Exception:
+            pass
+            
+        return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
+        
+    except Exception as e:
+        return {"answer": f"Помилка ШІ: {str(e)}"}
 
 @app.post("/ask")
 def ask_question(data: dict):
