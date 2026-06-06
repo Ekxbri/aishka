@@ -12,10 +12,7 @@ import os
 app = FastAPI(title="Aishka API")
 security = HTTPBasic()
 
-print("Завантаження оптимізованого алгоритму...")
 vectorizer = TfidfVectorizer()
-
-# Пам'ять
 topics_text = []
 topics_vectors = None
 DB_FILE = "database.json"
@@ -27,9 +24,7 @@ async def load_database():
         with open(DB_FILE, "r", encoding="utf-8") as f:
             topics_text = json.load(f)
         if topics_text:
-            print(f"Відновлено {len(topics_text)} тем. Векторизую...")
             topics_vectors = vectorizer.fit_transform(topics_text)
-            print("ШІ готовий до роботи!")
 
 def check_admin(credentials: HTTPBasicCredentials = Depends(security)):
     if credentials.username != "admin" or credentials.password != "1234":
@@ -54,26 +49,33 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         raw_blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
     else:
         text = content.decode("utf-8")
-        raw_blocks = [block.strip() for block in text.split('\n\n') if block.strip()]
+        raw_blocks = [block.strip() for block in text.split('\n') if block.strip()]
     
     if not raw_blocks:
         return {"message": "Файл порожній."}
 
     blocks = []
-    current_topic = ""
+    current_block = ""
+    
     for text_part in raw_blocks:
-        if len(text_part.split()) < 15:
-            current_topic += text_part + "\n\n"
+        words = text_part.split()
+        # Якщо рядок короткий (менше 12 слів), робимо його новим заголовком
+        if len(words) < 12:
+            if current_block:
+                blocks.append(current_block.strip())
+            current_block = f"<b>📌 {text_part}</b>\n\n"
         else:
-            current_topic += text_part
-            blocks.append(current_topic)
-            current_topic = ""
+            # Всі наступні абзаци приклеюємо до поточного заголовку
+            if not current_block:
+                current_block = text_part + "\n"
+            else:
+                current_block += text_part + "\n"
             
-    if current_topic:
-        if blocks: blocks[-1] += "\n\n" + current_topic
-        else: blocks.append(current_topic)
+    if current_block:
+        blocks.append(current_block.strip())
 
-    topics_text.extend(blocks)
+    # Очищаємо стару базу при новому завантаженні, щоб не було дублів старих обрізаних текстів
+    topics_text = blocks
     
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(topics_text, f, ensure_ascii=False, indent=4)
@@ -81,14 +83,13 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Додано {len(blocks)} нових тем. Всього в базі: {len(topics_text)}."}
+    return {"message": f"Успішно! Збережено {len(blocks)} повноцінних тем."}
 
 @app.post("/ask")
 def ask_question(data: dict):
     try:
         question_text = data.get("question", "")
         
-        # 1. Шукаємо в конспекті
         if topics_vectors is not None and len(topics_text) > 0:
             query_vec = vectorizer.transform([question_text])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
@@ -97,28 +98,14 @@ def ask_question(data: dict):
             score = similarities[best_match_idx]
             
             if score > 0.1:
-                raw_answer = topics_text[best_match_idx]
-                
-                # Розділяємо текст: все, що до першого відступу - це заголовок
-                parts = raw_answer.split('\n\n', 1)
-                
-                if len(parts) == 2:
-                    # Робимо заголовок жирним і додаємо шпильку
-                    formatted_answer = f"<b>📌 {parts[0].strip()}</b>\n\n{parts[1].strip()}"
-                else:
-                    formatted_answer = raw_answer
-                    
-                return {"answer": formatted_answer}
+                return {"answer": topics_text[best_match_idx]}
 
-        # 2. Якщо немає в конспекті - йдемо в інтернет
         results = DDGS().text(question_text, max_results=1)
         if results:
             web_answer = results[0]['body']
-            # Тут теж додаємо жирний шрифт для краси
-            return {"answer": f"🌐 <b>Знайдено в інтернеті:</b>\n\n{web_answer}"}
+            return {"answer": f"🌐 <b>Знайдено в інтернеті:</b>\n{web_answer}"}
             
         return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
         
     except Exception as e:
-        print(f"Критична помилка: {e}")
-        return {"answer": f"Внутрішня помилка ШІ: {str(e)}"}
+        return {"answer": f"Помилка: {str(e)}"}
