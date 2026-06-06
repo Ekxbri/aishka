@@ -67,22 +67,22 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
             continue
             
         words = text_part.split()
-        
-        # 1. Перевірка на розділові знаки в кінці (звичайні речення)
         ends_with_punct = text_part.endswith(('.', ',', ';', ':'))
-        # 2. Перевірка на списки
         is_list = text_part.startswith(('-', '•', '*', '–', '+')) or re.match(r"^\d+[\)\\]", text_part)
         
-        # Розумна логіка заголовків
         is_header = False
+        
         if len(words) < 12 and not is_list:
-            if not ends_with_punct:
-                is_header = True
-            elif text_part.isupper():
-                is_header = True
-            elif len(words) <= 4: # Дуже короткі рядки типу "1. Вступ."
-                is_header = True
-                
+            # ГОЛОВНЕ ПРАВИЛО: Якщо рядок починається з малої літери — це НЕ заголовок.
+            # Це відсікає такі "хвости", як "часу.", "об'єктом." тощо.
+            if not text_part[0].islower():
+                if not ends_with_punct:
+                    is_header = True
+                elif text_part.isupper():
+                    is_header = True
+                elif len(words) <= 5:
+                    is_header = True
+                    
         if is_header:
             if current_body:
                 blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
@@ -91,7 +91,6 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         else:
             current_body.append(text_part)
             
-            # Щоб ШІ не плутався у величезних текстах, ріжемо їх на шматки по ~250 слів
             if sum(len(p.split()) for p in current_body) > 250:
                 blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
                 current_body = []
@@ -107,7 +106,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} покращених тем."}
+    return {"message": f"Успішно! Збережено {len(blocks)} тем. Відірвані слова більше не будуть заголовками."}
 
 @app.post("/ask")
 def ask_question(data: dict):
@@ -121,7 +120,6 @@ def ask_question(data: dict):
         is_short = "коротк" in q_lower or "стисл" in q_lower
         is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
         
-        # Вирізаємо слова-команди з пошуку, щоб вони не збивали алгоритм TF-IDF
         search_query = re.sub(r'(?i)(коротко|стисло|детально|розгорнуто|все про)', '', question_text).strip()
         if not search_query:
             search_query = question_text
@@ -139,7 +137,6 @@ def ask_question(data: dict):
             query_vec = vectorizer.transform([search_query])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
             
-            # БОНУС: Якщо ШІ знаходить точний збіг фрази із запиту в тексті, він одразу видає цей блок
             for i, block in enumerate(topics_text):
                 if search_query.lower() in block.lower():
                     similarities[i] += 0.5 
