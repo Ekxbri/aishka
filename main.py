@@ -17,6 +17,8 @@ topics_text = []
 topics_vectors = None
 DB_FILE = "database.json"
 
+last_question = ""
+
 @app.on_event("startup")
 async def load_database():
     global topics_text, topics_vectors
@@ -55,25 +57,33 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         return {"message": "Файл порожній."}
 
     blocks = []
-    current_topic = ""
+    current_title = ""
+    current_body = []
     
     for text_part in raw_blocks:
         words = text_part.split()
-        # Якщо рядок короткий (менше 15 слів) — це заголовок нової теми
-        if len(words) < 15:
-            if current_topic:
-                blocks.append(current_topic.strip())
-            current_topic = f"<b>📌 {text_part}</b>\n\n"
+        # Нове правило: ігноруємо рядки з двокрапкою та списки
+        is_list_item = text_part.lstrip().startswith(('-', '•', '*', '1', '2', '3', '4', '5', '6', '7', '8', '9'))
+        
+        if len(words) < 15 and not text_part.endswith(':') and not is_list_item:
+            if current_body:
+                title_str = f"<b>📌 {current_title}</b>\n\n" if current_title else ""
+                blocks.append(title_str + "\n\n".join(current_body))
+                current_title = text_part
+                current_body = []
+            else:
+                if current_title:
+                    current_title += " " + text_part
+                else:
+                    current_title = text_part
         else:
-            # Усі наступні абзаци приклеюємо ДО ЦІЄЇ Ж ТЕМИ, а не створюємо нові блоки
-            if not current_topic:
-                current_topic = "<b>📌 Загальна інформація</b>\n\n"
-            current_topic += text_part + "\n\n"
+            current_body.append(text_part)
             
-    if current_topic:
-        blocks.append(current_topic.strip())
+    if current_title or current_body:
+        title_str = f"<b>📌 {current_title}</b>\n\n" if current_title else ""
+        if current_body:
+            blocks.append(title_str + "\n\n".join(current_body))
 
-    # Перезаписуємо базу правильними великими темами
     topics_text = blocks
     
     with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -82,10 +92,11 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} згрупованих тем. Пошук тепер буде точним."}
+    return {"message": f"Успішно! Збережено {len(blocks)} тем. Списки обробляються коректно."}
 
 @app.post("/ask")
 def ask_question(data: dict):
+    global last_question
     try:
         question_text = data.get("question", "").strip()
         if not question_text:
@@ -95,8 +106,20 @@ def ask_question(data: dict):
         is_short = "коротк" in q_lower or "стисл" in q_lower
         is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
         
+        search_query = question_text
+        if len(question_text.split()) <= 3 and last_question:
+            search_query = f"{last_question} {question_text}"
+        
+        if not is_short and not is_long and len(question_text.split()) > 2:
+            last_question = question_text
+        
+        for block in topics_text:
+            first_line = block.split('\n')[0].lower()
+            if q_lower in first_line:
+                return {"answer": block}
+
         if topics_vectors is not None and len(topics_text) > 0:
-            query_vec = vectorizer.transform([question_text])
+            query_vec = vectorizer.transform([search_query])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
             
             best_match_idx = similarities.argmax()
@@ -104,8 +127,6 @@ def ask_question(data: dict):
             
             if score > 0.02:
                 full_topic = topics_text[best_match_idx]
-                
-                # Розбиваємо знайдену тему на заголовок та окремі абзаци
                 parts = full_topic.split('\n\n')
                 title = parts[0]
                 paragraphs = [p.strip() for p in parts[1:] if p.strip()]
@@ -113,16 +134,11 @@ def ask_question(data: dict):
                 if not paragraphs:
                     return {"answer": full_topic}
                 
-                # 1. Режим: КОРОТКО
                 if is_short:
                     first_sentence = paragraphs[0].split('.')[0] + "."
                     return {"answer": f"{title}\n\n{first_sentence}"}
-                
-                # 2. Режим: ДЕТАЛЬНО
                 elif is_long:
                     return {"answer": full_topic}
-                
-                # 3. Режим: СТАНДАРТНО (Видаємо лише перші 2 абзаци, щоб не перевантажувати)
                 else:
                     preview = "\n\n".join(paragraphs[:2])
                     if len(paragraphs) > 2:
@@ -130,66 +146,7 @@ def ask_question(data: dict):
                     return {"answer": f"{title}\n\n{preview}"}
 
         try:
-            results = DDGS().text(question_text, max_results=1)
-            if results:
-                web_answer = results[0]['body']
-                return {"answer": f"🌐 <b>Знайдено в інтернеті:</b><br><br>{web_answer}"}
-        except Exception:
-            pass
-            
-        return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
-        
-    except Exception as e:
-        return {"answer": f"Помилка ШІ: {str(e)}"}
-
-@app.post("/ask")
-def ask_question(data: dict):
-    try:
-        question_text = data.get("question", "").strip()
-        if not question_text:
-            return {"answer": "Порожній запит."}
-        
-        # Перевіряємо, яку відповідь хоче користувач
-        q_lower = question_text.lower()
-        is_short = "коротк" in q_lower or "стисл" in q_lower
-        is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
-        
-        if topics_vectors is not None and len(topics_text) > 0:
-            query_vec = vectorizer.transform([question_text])
-            similarities = cosine_similarity(query_vec, topics_vectors)[0]
-            
-            best_match_idx = similarities.argmax()
-            score = similarities[best_match_idx]
-            
-            if score > 0.05:
-                base_chunk = topics_text[best_match_idx]
-                
-                # 1. Якщо просять КОРОТКО (видаємо лише перше речення)
-                if is_short:
-                    parts = base_chunk.split('\n\n', 1)
-                    if len(parts) > 1:
-                        first_sentence = parts[1].split('.')[0] + "."
-                        return {"answer": f"{parts[0]}\n\n{first_sentence}"}
-                    return {"answer": base_chunk}
-                    
-                # 2. Якщо просять ДЕТАЛЬНО (додаємо ще 2 абзаци з цієї ж теми)
-                elif is_long:
-                    answer = base_chunk
-                    parts = base_chunk.split('\n\n', 1)
-                    title = parts[0] if len(parts) > 1 else ""
-                    
-                    for i in range(best_match_idx + 1, min(len(topics_text), best_match_idx + 3)):
-                        next_chunk = topics_text[i]
-                        if title and next_chunk.startswith(title):
-                            next_body = next_chunk.split('\n\n', 1)[1]
-                            answer += f"\n\n{next_body}"
-                    return {"answer": answer}
-                    
-                # 3. СТАНДАРТНО (один абзац)
-                return {"answer": base_chunk}
-
-        try:
-            results = DDGS().text(question_text, max_results=1)
+            results = DDGS().text(search_query, max_results=1)
             if results:
                 web_answer = results[0]['body']
                 return {"answer": f"🌐 <b>Знайдено в інтернеті:</b><br><br>{web_answer}"}
