@@ -55,37 +55,25 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         return {"message": "Файл порожній."}
 
     blocks = []
-    current_title = ""
-    current_body = []
+    current_topic = ""
     
     for text_part in raw_blocks:
         words = text_part.split()
-        # Якщо рядок короткий (це заголовок або підзаголовок)
+        # Якщо рядок короткий (менше 15 слів) — це заголовок нової теми
         if len(words) < 15:
-            if current_body:
-                # Зберігаємо попередню тему (бо знайшли новий заголовок після тексту)
-                title_str = f"<b>📌 {current_title}</b>\n\n" if current_title else ""
-                blocks.append(title_str + "\n\n".join(current_body))
-                
-                # Починаємо нову тему
-                current_title = text_part
-                current_body = []
-            else:
-                # Якщо тексту ще не було, склеюємо заголовки разом (наприклад "1. Тема..." і "1.1 Підтема...")
-                if current_title:
-                    current_title += " " + text_part
-                else:
-                    current_title = text_part
+            if current_topic:
+                blocks.append(current_topic.strip())
+            current_topic = f"<b>📌 {text_part}</b>\n\n"
         else:
-            # Це основний довгий текст
-            current_body.append(text_part)
+            # Усі наступні абзаци приклеюємо ДО ЦІЄЇ Ж ТЕМИ, а не створюємо нові блоки
+            if not current_topic:
+                current_topic = "<b>📌 Загальна інформація</b>\n\n"
+            current_topic += text_part + "\n\n"
             
-    # Зберігаємо останню тему в кінці файлу
-    if current_title or current_body:
-        title_str = f"<b>📌 {current_title}</b>\n\n" if current_title else ""
-        if current_body:
-            blocks.append(title_str + "\n\n".join(current_body))
+    if current_topic:
+        blocks.append(current_topic.strip())
 
+    # Перезаписуємо базу правильними великими темами
     topics_text = blocks
     
     with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -94,7 +82,65 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} правильно склеєних тем."}
+    return {"message": f"Успішно! Збережено {len(blocks)} згрупованих тем. Пошук тепер буде точним."}
+
+@app.post("/ask")
+def ask_question(data: dict):
+    try:
+        question_text = data.get("question", "").strip()
+        if not question_text:
+            return {"answer": "Порожній запит."}
+        
+        q_lower = question_text.lower()
+        is_short = "коротк" in q_lower or "стисл" in q_lower
+        is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
+        
+        if topics_vectors is not None and len(topics_text) > 0:
+            query_vec = vectorizer.transform([question_text])
+            similarities = cosine_similarity(query_vec, topics_vectors)[0]
+            
+            best_match_idx = similarities.argmax()
+            score = similarities[best_match_idx]
+            
+            if score > 0.02:
+                full_topic = topics_text[best_match_idx]
+                
+                # Розбиваємо знайдену тему на заголовок та окремі абзаци
+                parts = full_topic.split('\n\n')
+                title = parts[0]
+                paragraphs = [p.strip() for p in parts[1:] if p.strip()]
+                
+                if not paragraphs:
+                    return {"answer": full_topic}
+                
+                # 1. Режим: КОРОТКО
+                if is_short:
+                    first_sentence = paragraphs[0].split('.')[0] + "."
+                    return {"answer": f"{title}\n\n{first_sentence}"}
+                
+                # 2. Режим: ДЕТАЛЬНО
+                elif is_long:
+                    return {"answer": full_topic}
+                
+                # 3. Режим: СТАНДАРТНО (Видаємо лише перші 2 абзаци, щоб не перевантажувати)
+                else:
+                    preview = "\n\n".join(paragraphs[:2])
+                    if len(paragraphs) > 2:
+                        preview += "\n\n<i>...у цьому розділі є ще інформація. Додай слово 'детально' до запиту, щоб побачити весь текст.</i>"
+                    return {"answer": f"{title}\n\n{preview}"}
+
+        try:
+            results = DDGS().text(question_text, max_results=1)
+            if results:
+                web_answer = results[0]['body']
+                return {"answer": f"🌐 <b>Знайдено в інтернеті:</b><br><br>{web_answer}"}
+        except Exception:
+            pass
+            
+        return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
+        
+    except Exception as e:
+        return {"answer": f"Помилка ШІ: {str(e)}"}
 
 @app.post("/ask")
 def ask_question(data: dict):
