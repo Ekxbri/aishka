@@ -84,28 +84,30 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     return {"message": f"Успішно! Додано {len(blocks)} нових тем. Всього в базі: {len(topics_text)}."}
 
 @app.post("/ask")
-async def ask_question(data: dict):
-    question_text = data.get("question", "")
-    
-    # 1. Шукаємо в конспекті (через математичну подібність)
-    if topics_vectors is not None and len(topics_text) > 0:
-        query_vec = vectorizer.transform([question_text])
-        similarities = cosine_similarity(query_vec, topics_vectors)[0]
-        
-        best_match_idx = similarities.argmax()
-        score = similarities[best_match_idx]
-        
-        # Поріг збігу (10% ключових слів)
-        if score > 0.1:
-            return {"answer": topics_text[best_match_idx]}
-
-    # 2. Якщо немає в конспекті - інтернет
+def ask_question(data: dict):
     try:
+        question_text = data.get("question", "")
+        
+        # 1. Шукаємо в конспекті (через математичну подібність)
+        if topics_vectors is not None and len(topics_text) > 0:
+            query_vec = vectorizer.transform([question_text])
+            similarities = cosine_similarity(query_vec, topics_vectors)[0]
+            
+            best_match_idx = similarities.argmax()
+            score = similarities[best_match_idx]
+            
+            # Поріг збігу (10% ключових слів)
+            if score > 0.1:
+                return {"answer": topics_text[best_match_idx]}
+
+        # 2. Якщо немає в конспекті - йдемо в інтернет
         results = DDGS().text(question_text, max_results=1)
         if results:
             web_answer = results[0]['body']
             return {"answer": f"🌐 Знайдено в інтернеті: {web_answer}"}
-    except Exception:
-        return {"answer": "Помилка пошуку в інтернеті."}
+            
+        return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
         
-    return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
+    except Exception as e:
+        print(f"Критична помилка: {e}")
+        return {"answer": f"Внутрішня помилка ШІ: {str(e)}"}
