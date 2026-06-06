@@ -1,21 +1,35 @@
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
-from sentence_transformers import SentenceTransformer, util
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from duckduckgo_search import DDGS
 import docx
 import io
+import json
+import os
 
 app = FastAPI(title="Aishka API")
 security = HTTPBasic()
 
-# Завантажуємо розумну мовну модель (розуміє зміст, а не просто букви)
-print("Завантаження моделі... (потрібно почекати)")
-embedder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+print("Завантаження оптимізованого алгоритму...")
+vectorizer = TfidfVectorizer()
 
-# Пам'ять нашої Aishka
+# Пам'ять
 topics_text = []
-topics_embeddings = None
+topics_vectors = None
+DB_FILE = "database.json"
+
+@app.on_event("startup")
+async def load_database():
+    global topics_text, topics_vectors
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            topics_text = json.load(f)
+        if topics_text:
+            print(f"Відновлено {len(topics_text)} тем. Векторизую...")
+            topics_vectors = vectorizer.fit_transform(topics_text)
+            print("ШІ готовий до роботи!")
 
 def check_admin(credentials: HTTPBasicCredentials = Depends(security)):
     if credentials.username != "admin" or credentials.password != "1234":
@@ -32,10 +46,9 @@ async def serve_frontend():
 
 @app.post("/upload")
 async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_admin)):
-    global topics_text, topics_embeddings
+    global topics_text, topics_vectors
     content = await file.read()
     
-    # Читаємо файл (Word або TXT)
     if file.filename.endswith('.docx'):
         doc = docx.Document(io.BytesIO(content))
         raw_blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
@@ -46,7 +59,6 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if not raw_blocks:
         return {"message": "Файл порожній."}
 
-    # РОЗУМНЕ ОБ'ЄДНАННЯ (клеїмо заголовки до тексту)
     blocks = []
     current_topic = ""
     for text_part in raw_blocks:
@@ -61,54 +73,39 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         if blocks: blocks[-1] += "\n\n" + current_topic
         else: blocks.append(current_topic)
 
-    topics_text = blocks
-    # Перетворюємо весь конспект на вектори змісту
-    topics_embeddings = embedder.encode(topics_text, convert_to_tensor=True)
+    topics_text.extend(blocks)
     
-    return {"message": f"Успішно! Я проаналізувала {len(blocks)} тем і готова відповідати."}
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(topics_text, f, ensure_ascii=False, indent=4)
+        
+    if len(topics_text) > 0:
+        topics_vectors = vectorizer.fit_transform(topics_text)
+    
+    return {"message": f"Успішно! Додано {len(blocks)} нових тем. Всього в базі: {len(topics_text)}."}
 
 @app.post("/ask")
 async def ask_question(data: dict):
     question_text = data.get("question", "")
-    print(f"\n--- НОВИЙ ЗАПИТ ВІД КОРИСТУВАЧА: '{question_text}' ---")
     
-    # 1. Перевіряємо конспект
-    if topics_embeddings is not None and len(topics_text) > 0:
-        print(f"База конспекту завантажена. Кількість тем: {len(topics_text)}")
+    # 1. Шукаємо в конспекті (через математичну подібність)
+    if topics_vectors is not None and len(topics_text) > 0:
+        query_vec = vectorizer.transform([question_text])
+        similarities = cosine_similarity(query_vec, topics_vectors)[0]
         
-        query_embedding = embedder.encode(question_text, convert_to_tensor=True)
-        hits = util.semantic_search(query_embedding, topics_embeddings, top_k=1)
+        best_match_idx = similarities.argmax()
+        score = similarities[best_match_idx]
         
-        best_match_idx = hits[0][0]['corpus_id']
-        score = hits[0][0]['score']
-        
-        print(f"Найкращий збіг: Тема №{best_match_idx} з точністю {score:.2f}")
-        
-        if score > 0.4:
-            answer = topics_text[best_match_idx]
-            print(f"Віддаю відповідь з конспекту: {answer[:50]}...")
-            return {"answer": answer}
-        else:
-            print("Точність нижче 0.4. В конспекті цього немає.")
-    else:
-        print("ПОМИЛКА: Конспект не завантажено або він порожній!")
+        # Поріг збігу (10% ключових слів)
+        if score > 0.1:
+            return {"answer": topics_text[best_match_idx]}
 
-    # 2. Шукаємо в інтернеті
-    print("Пробую знайти в DuckDuckGo...")
+    # 2. Якщо немає в конспекті - інтернет
     try:
         results = DDGS().text(question_text, max_results=1)
         if results:
             web_answer = results[0]['body']
-            print("Успішно знайдено в інтернеті.")
             return {"answer": f"🌐 Знайдено в інтернеті: {web_answer}"}
-        else:
-            print("DuckDuckGo нічого не знайшов.")
-    except Exception as e:
-        print(f"Помилка під час пошуку в інтернеті: {e}")
+    except Exception:
         return {"answer": "Помилка пошуку в інтернеті."}
         
     return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=3000, reload=True)
