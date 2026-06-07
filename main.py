@@ -71,10 +71,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         is_list = text_part.startswith(('-', '•', '*', '–', '+')) or re.match(r"^\d+[\)\\]", text_part)
         
         is_header = False
-        
         if len(words) < 12 and not is_list:
-            # ГОЛОВНЕ ПРАВИЛО: Якщо рядок починається з малої літери — це НЕ заголовок.
-            # Це відсікає такі "хвости", як "часу.", "об'єктом." тощо.
             if not text_part[0].islower():
                 if not ends_with_punct:
                     is_header = True
@@ -90,7 +87,6 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
             current_title = text_part
         else:
             current_body.append(text_part)
-            
             if sum(len(p.split()) for p in current_body) > 250:
                 blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
                 current_body = []
@@ -106,7 +102,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} тем. Відірвані слова більше не будуть заголовками."}
+    return {"message": f"Успішно! Збережено {len(blocks)} тем. Працює дворівневий пошук."}
 
 @app.post("/ask")
 def ask_question(data: dict):
@@ -153,16 +149,40 @@ def ask_question(data: dict):
             if not paragraphs:
                 return {"answer": full_topic}
             
+            # === ДРУГИЙ ЕТАП: ШУКАЄМО ТОЧНИЙ АБЗАЦ ===
+            best_p_idx = 0
+            if len(paragraphs) > 1:
+                p_vecs = vectorizer.transform(paragraphs)
+                q_vec = vectorizer.transform([search_query])
+                p_sims = cosine_similarity(q_vec, p_vecs)[0]
+                
+                # Бонус за точний збіг слова в абзаці
+                for i, p in enumerate(paragraphs):
+                    if search_query.lower() in p.lower():
+                        p_sims[i] += 2.0 
+                        
+                best_p_idx = p_sims.argmax()
+
+            # Формуємо відповідь ПОЧИНАЮЧИ зі знайденого абзацу
             if is_short:
-                first_p = paragraphs[0]
-                first_sentence = first_p.split('.')[0] + "." if '.' in first_p else first_p
+                target_p = paragraphs[best_p_idx]
+                first_sentence = target_p.split('.')[0] + "." if '.' in target_p else target_p
                 return {"answer": f"{title}\n\n{first_sentence}"}
             elif is_long:
-                return {"answer": full_topic}
+                # Видаємо потрібний абзац + 2 наступні (а не весь розділ з початку)
+                end_idx = min(len(paragraphs), best_p_idx + 3)
+                detailed_text = "\n\n".join(paragraphs[best_p_idx:end_idx])
+                if best_p_idx > 0:
+                    detailed_text = f"<i>(Фрагмент із середини розділу)</i>\n\n{detailed_text}"
+                return {"answer": f"{title}\n\n{detailed_text}"}
             else:
-                preview = "\n\n".join(paragraphs[:2])
-                if len(paragraphs) > 2:
-                    preview += "\n\n<i>...у цьому розділі є ще інформація. Додай слово 'детально', щоб побачити весь текст.</i>"
+                # Стандарт: 1 знайдений абзац + 1 наступний
+                end_idx = min(len(paragraphs), best_p_idx + 2)
+                preview = "\n\n".join(paragraphs[best_p_idx:end_idx])
+                if len(paragraphs) > end_idx:
+                    preview += "\n\n<i>...додай слово 'детально', щоб читати далі.</i>"
+                if best_p_idx > 0:
+                    preview = f"<i>(Фрагмент із середини розділу)</i>\n\n{preview}"
                 return {"answer": f"{title}\n\n{preview}"}
 
         try:
