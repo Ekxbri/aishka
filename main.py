@@ -13,7 +13,8 @@ import re
 app = FastAPI(title="Aishka API")
 security = HTTPBasic()
 
-vectorizer = TfidfVectorizer()
+# Налаштовано аналізатор на частини слів (розуміє, що "мета" і "мети" — це одне й те саме)
+vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5))
 topics_text = []
 topics_vectors = None
 DB_FILE = "database.json"
@@ -102,7 +103,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} тем. Працює дворівневий пошук."}
+    return {"message": f"Успішно! Збережено {len(blocks)} тем."}
 
 @app.post("/ask")
 def ask_question(data: dict):
@@ -116,7 +117,11 @@ def ask_question(data: dict):
         is_short = "коротк" in q_lower or "стисл" in q_lower
         is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
         
-        search_query = re.sub(r'(?i)(коротко|стисло|детально|розгорнуто|все про)', '', question_text).strip()
+        # Видаляємо питальні слова, щоб ШІ зосередився на суті
+        stop_words = r'(?i)\b(коротко|стисло|детально|розгорнуто|все про|що|таке|це|які|є|як|чому|навіщо)\b'
+        search_query = re.sub(stop_words, '', question_text).strip()
+        search_query = re.sub(r'\s+', ' ', search_query)
+        
         if not search_query:
             search_query = question_text
             
@@ -149,34 +154,29 @@ def ask_question(data: dict):
             if not paragraphs:
                 return {"answer": full_topic}
             
-            # === ДРУГИЙ ЕТАП: ШУКАЄМО ТОЧНИЙ АБЗАЦ ===
             best_p_idx = 0
             if len(paragraphs) > 1:
                 p_vecs = vectorizer.transform(paragraphs)
                 q_vec = vectorizer.transform([search_query])
                 p_sims = cosine_similarity(q_vec, p_vecs)[0]
                 
-                # Бонус за точний збіг слова в абзаці
                 for i, p in enumerate(paragraphs):
                     if search_query.lower() in p.lower():
                         p_sims[i] += 2.0 
                         
                 best_p_idx = p_sims.argmax()
 
-            # Формуємо відповідь ПОЧИНАЮЧИ зі знайденого абзацу
             if is_short:
                 target_p = paragraphs[best_p_idx]
                 first_sentence = target_p.split('.')[0] + "." if '.' in target_p else target_p
                 return {"answer": f"{title}\n\n{first_sentence}"}
             elif is_long:
-                # Видаємо потрібний абзац + 2 наступні (а не весь розділ з початку)
                 end_idx = min(len(paragraphs), best_p_idx + 3)
                 detailed_text = "\n\n".join(paragraphs[best_p_idx:end_idx])
                 if best_p_idx > 0:
                     detailed_text = f"<i>(Фрагмент із середини розділу)</i>\n\n{detailed_text}"
                 return {"answer": f"{title}\n\n{detailed_text}"}
             else:
-                # Стандарт: 1 знайдений абзац + 1 наступний
                 end_idx = min(len(paragraphs), best_p_idx + 2)
                 preview = "\n\n".join(paragraphs[best_p_idx:end_idx])
                 if len(paragraphs) > end_idx:
