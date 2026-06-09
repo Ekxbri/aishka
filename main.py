@@ -13,7 +13,6 @@ import re
 app = FastAPI(title="Aishka API")
 security = HTTPBasic()
 
-# ПОВЕРНУЛИ НАДІЙНИЙ АЛГОРИТМ: читає цілі слова + словосполучення по 2 слова
 vectorizer = TfidfVectorizer(ngram_range=(1, 2))
 topics_text = []
 topics_vectors = None
@@ -95,7 +94,12 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if current_body or (not blocks and current_title):
         blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
 
-    topics_text = blocks
+    # СУПЕРФІКС: Тепер ми не видаляємо старі теми, а додаємо нові (з перевіркою на дублікати)
+    added_count = 0
+    for b in blocks:
+        if b not in topics_text:
+            topics_text.append(b)
+            added_count += 1
     
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(topics_text, f, ensure_ascii=False, indent=4)
@@ -103,7 +107,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} тем. Предмети більше не сплутаються!"}
+    return {"message": f"Успішно! До бази додано {added_count} нових тем. Всього в пам'яті: {len(topics_text)} тем."}
 
 @app.post("/ask")
 def ask_question(data: dict):
@@ -137,7 +141,6 @@ def ask_question(data: dict):
             query_vec = vectorizer.transform([search_query])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
             
-            # Шукаємо точні збіги і даємо їм ВЕЛИЧЕЗНИЙ пріоритет
             for i, block in enumerate(topics_text):
                 if search_query.lower() in block.lower():
                     similarities[i] += 2.0 
