@@ -13,8 +13,8 @@ import re
 app = FastAPI(title="Aishka API")
 security = HTTPBasic()
 
-# Налаштовано аналізатор на частини слів (розуміє, що "мета" і "мети" — це одне й те саме)
-vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5))
+# ПОВЕРНУЛИ НАДІЙНИЙ АЛГОРИТМ: читає цілі слова + словосполучення по 2 слова
+vectorizer = TfidfVectorizer(ngram_range=(1, 2))
 topics_text = []
 topics_vectors = None
 DB_FILE = "database.json"
@@ -103,7 +103,7 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if len(topics_text) > 0:
         topics_vectors = vectorizer.fit_transform(topics_text)
     
-    return {"message": f"Успішно! Збережено {len(blocks)} тем."}
+    return {"message": f"Успішно! Збережено {len(blocks)} тем. Предмети більше не сплутаються!"}
 
 @app.post("/ask")
 def ask_question(data: dict):
@@ -117,7 +117,6 @@ def ask_question(data: dict):
         is_short = "коротк" in q_lower or "стисл" in q_lower
         is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
         
-        # Видаляємо питальні слова, щоб ШІ зосередився на суті
         stop_words = r'(?i)\b(коротко|стисло|детально|розгорнуто|все про|що|таке|це|які|є|як|чому|навіщо)\b'
         search_query = re.sub(stop_words, '', question_text).strip()
         search_query = re.sub(r'\s+', ' ', search_query)
@@ -138,9 +137,10 @@ def ask_question(data: dict):
             query_vec = vectorizer.transform([search_query])
             similarities = cosine_similarity(query_vec, topics_vectors)[0]
             
+            # Шукаємо точні збіги і даємо їм ВЕЛИЧЕЗНИЙ пріоритет
             for i, block in enumerate(topics_text):
                 if search_query.lower() in block.lower():
-                    similarities[i] += 0.5 
+                    similarities[i] += 2.0 
                     
             best_match_idx = similarities.argmax()
             best_score = similarities[best_match_idx]
@@ -162,7 +162,7 @@ def ask_question(data: dict):
                 
                 for i, p in enumerate(paragraphs):
                     if search_query.lower() in p.lower():
-                        p_sims[i] += 2.0 
+                        p_sims[i] += 5.0 
                         
                 best_p_idx = p_sims.argmax()
 
