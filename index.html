@@ -20,7 +20,6 @@
         .teacher-btn { background: none; border: none; color: #8b949e; cursor: pointer; font-size: 12px; position: absolute; top: 15px; right: 20px; }
         .teacher-btn:hover { color: white; }
 
-        /* Teacher Panel */
         #teacher-panel { display: none; background-color: #161b22; border-bottom: 1px solid #30363d; padding: 15px; gap: 10px; align-items: center; justify-content: center; }
         .teacher-input { padding: 8px 15px; border-radius: 15px; border: 1px solid #30363d; background-color: #0d1117; color: white; }
         .upload-btn { background-color: #1f6feb; color: white; border: none; padding: 8px 15px; border-radius: 15px; cursor: pointer; }
@@ -39,7 +38,13 @@
     </div>
 
     <div class="chat-container" id="chat">
-        <div class="message bot-msg">Привіт! Я Aishka Pro. Запитай мене щось по навчанню, або напиши: <b>"головне по темі [назва]"</b>.</div>
+        <div class="message bot-msg">
+            Привіт! Я Aishka Pro. 🎓<br><br>
+            Ось як мною користуватися:<br>
+            🔹 <b>Пошук:</b> <i>"Що таке моделювання?"</i> (коротка відповідь з бази)<br>
+            🔹 <b>Детально:</b> <i>"Поняття моделювання детальніше"</i> (видам весь текст теми)<br>
+            🔹 <b>Вижимка:</b> <i>"Головне по темі Класифікація моделей"</i> (лише основні тези)
+        </div>
     </div>
 
     <div class="input-area">
@@ -58,9 +63,7 @@
             let subject = document.getElementById("t-subject").value;
             let file = document.getElementById("t-file").files[0];
 
-            if (!pass || !subject || !file) {
-                alert("Заповніть всі поля!"); return;
-            }
+            if (!pass || !subject || !file) { alert("Заповніть всі поля!"); return; }
 
             let formData = new FormData();
             formData.append("password", pass);
