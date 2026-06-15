@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-python-multipart
 scikit-learn
-duckduckgo-search
 python-docx
+duckduckgo-search
+python-multipart
+pymongo
