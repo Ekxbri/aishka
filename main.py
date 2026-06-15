@@ -1,38 +1,59 @@
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form
 from fastapi.responses import HTMLResponse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from duckduckgo_search import DDGS
 import docx
 import io
-import json
 import os
 import re
+import pymongo
 
-app = FastAPI(title="Aishka API")
-security = HTTPBasic()
+app = FastAPI(title="Aishka Pro")
 
+TEACHER_PASSWORD = "teacher" # Пароль для завантаження конспектів
+
+# --- ПІДКЛЮЧЕННЯ ДО ХМАРНОЇ БАЗИ MONGODB ---
+# Встав свій пароль замість <db_password> (без дужок < >)
+MONGO_URI = "mongodb+srv://rgbdf969_db_user:<1234qwer>@cluster0.wrhsfpw.mongodb.net/?appName=Cluster0"
+
+client = pymongo.MongoClient(MONGO_URI)
+db = client["aishka_database"]
+collection = db["topics"]
+
+db_data = []
+corpus_texts = []
+corpus_meta = []
 vectorizer = TfidfVectorizer(ngram_range=(1, 2))
-topics_text = []
 topics_vectors = None
-DB_FILE = "database.json"
 
-last_question = ""
+def rebuild_vectors():
+    global corpus_texts, corpus_meta, topics_vectors
+    corpus_texts = []
+    corpus_meta = []
+    
+    for item_idx, item in enumerate(db_data):
+        subject = item.get("subject", "Загальне")
+        title = item.get("title", "Без назви")
+        
+        corpus_texts.append(f"ПРЕДМЕТ: {subject}. ТЕМА: {title}")
+        corpus_meta.append({"type": "title", "item_idx": item_idx})
+        
+        for p_idx, para in enumerate(item.get("paragraphs", [])):
+            corpus_texts.append(f"{subject}. {title}. {para}")
+            corpus_meta.append({"type": "paragraph", "item_idx": item_idx, "p_idx": p_idx})
+            
+    if corpus_texts:
+        topics_vectors = vectorizer.fit_transform(corpus_texts)
 
 @app.on_event("startup")
 async def load_database():
-    global topics_text, topics_vectors
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            topics_text = json.load(f)
-        if topics_text:
-            topics_vectors = vectorizer.fit_transform(topics_text)
-
-def check_admin(credentials: HTTPBasicCredentials = Depends(security)):
-    if credentials.username != "admin" or credentials.password != "1234":
-        raise HTTPException(status_code=401, detail="Помилка доступу", headers={"WWW-Authenticate": "Basic"})
-    return credentials.username
+    global db_data
+    # При запуску сервера вантажимо все з MongoDB
+    db_data = list(collection.find({}, {"_id": 0}))
+    if db_data:
+        rebuild_vectors()
+    print(f"Завантажено {len(db_data)} тем з хмари MongoDB.")
 
 @app.get("/")
 async def serve_frontend():
@@ -43,10 +64,16 @@ async def serve_frontend():
         return {"error": "Файл index.html не знайдено"}
 
 @app.post("/upload")
-async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_admin)):
-    global topics_text, topics_vectors
+async def upload_notes(
+    file: UploadFile = File(...), 
+    subject: str = Form(...), 
+    password: str = Form(...)
+):
+    global db_data
+    if password != TEACHER_PASSWORD:
+        return {"message": "❌ Невірний пароль вчителя!"}
+        
     content = await file.read()
-    
     if file.filename.endswith('.docx'):
         doc = docx.Document(io.BytesIO(content))
         raw_blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
@@ -57,14 +84,13 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
     if not raw_blocks:
         return {"message": "Файл порожній."}
 
-    blocks = []
     current_title = "Загальна інформація"
     current_body = []
+    blocks_to_add = []
     
     for text_part in raw_blocks:
         text_part = text_part.strip()
-        if not text_part:
-            continue
+        if not text_part: continue
             
         words = text_part.split()
         ends_with_punct = text_part.endswith(('.', ',', ';', ':'))
@@ -73,120 +99,108 @@ async def upload_notes(file: UploadFile = File(...), admin: str = Depends(check_
         is_header = False
         if len(words) < 12 and not is_list:
             if not text_part[0].islower():
-                if not ends_with_punct:
-                    is_header = True
-                elif text_part.isupper():
-                    is_header = True
-                elif len(words) <= 5:
+                if not ends_with_punct or text_part.isupper() or len(words) <= 5:
                     is_header = True
                     
         if is_header:
             if current_body:
-                blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
+                blocks_to_add.append({"subject": subject.strip(), "title": current_title, "paragraphs": current_body})
                 current_body = []
             current_title = text_part
         else:
             current_body.append(text_part)
-            if sum(len(p.split()) for p in current_body) > 250:
-                blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
-                current_body = []
 
-    if current_body or (not blocks and current_title):
-        blocks.append(f"<b>📌 {current_title}</b>\n\n" + "\n\n".join(current_body))
+    if current_body or current_title != "Загальна інформація":
+        blocks_to_add.append({"subject": subject.strip(), "title": current_title, "paragraphs": current_body})
 
-    # СУПЕРФІКС: Тепер ми не видаляємо старі теми, а додаємо нові (з перевіркою на дублікати)
+    # Відправляємо в MongoDB (уникаючи дублікатів)
     added_count = 0
-    for b in blocks:
-        if b not in topics_text:
-            topics_text.append(b)
+    for new_topic in blocks_to_add:
+        exists = collection.find_one({"subject": new_topic["subject"], "title": new_topic["title"]})
+        if not exists:
+            collection.insert_one(new_topic)
+            new_topic.pop("_id", None) # Видаляємо службовий ID від Монго перед додаванням в оперативку
+            db_data.append(new_topic)
             added_count += 1
-    
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(topics_text, f, ensure_ascii=False, indent=4)
-        
-    if len(topics_text) > 0:
-        topics_vectors = vectorizer.fit_transform(topics_text)
-    
-    return {"message": f"Успішно! До бази додано {added_count} нових тем. Всього в пам'яті: {len(topics_text)} тем."}
+
+    rebuild_vectors()
+    return {"message": f"✅ Успішно! В хмарну базу додано {added_count} нових тем."}
 
 @app.post("/ask")
 def ask_question(data: dict):
-    global last_question
     try:
-        question_text = data.get("question", "").strip()
-        if not question_text:
-            return {"answer": "Порожній запит."}
+        q = data.get("question", "").strip()
+        if not q: return {"answer": "Порожній запит."}
         
-        q_lower = question_text.lower()
-        is_short = "коротк" in q_lower or "стисл" in q_lower
-        is_long = "детальн" in q_lower or "розгорнут" in q_lower or "все про" in q_lower
+        q_lower = q.lower()
         
-        stop_words = r'(?i)\b(коротко|стисло|детально|розгорнуто|все про|що|таке|це|які|є|як|чому|навіщо)\b'
-        search_query = re.sub(stop_words, '', question_text).strip()
-        search_query = re.sub(r'\s+', ' ', search_query)
-        
-        if not search_query:
-            search_query = question_text
+        summary_match = re.search(r'(головне|основне|суть|коротко|тези)\s*(по|про|в)?\s*тем[іі]\s*(.+)', q_lower)
+        if summary_match and topics_vectors is not None:
+            target_topic = summary_match.group(3).strip()
             
-        if len(search_query.split()) <= 3 and last_question:
-            search_query = f"{last_question} {search_query}"
-        
-        if not is_short and not is_long and len(question_text.split()) > 2:
-            last_question = question_text
-
-        best_match_idx = -1
-        best_score = 0
-        
-        if topics_vectors is not None and len(topics_text) > 0:
-            query_vec = vectorizer.transform([search_query])
-            similarities = cosine_similarity(query_vec, topics_vectors)[0]
+            query_vec = vectorizer.transform([target_topic])
+            sims = cosine_similarity(query_vec, topics_vectors)[0]
             
-            for i, block in enumerate(topics_text):
-                if search_query.lower() in block.lower():
-                    similarities[i] += 2.0 
+            best_score = 0
+            best_item = None
+            
+            for idx, score in enumerate(sims):
+                meta = corpus_meta[idx]
+                if meta["type"] == "title" and score > best_score:
+                    best_score = score
+                    best_item = db_data[meta["item_idx"]]
                     
-            best_match_idx = similarities.argmax()
-            best_score = similarities[best_match_idx]
-
-        if best_score > 0.05 and best_match_idx != -1:
-            full_topic = topics_text[best_match_idx]
-            parts = full_topic.split('\n\n')
-            title = parts[0]
-            paragraphs = [p.strip() for p in parts[1:] if p.strip()]
-            
-            if not paragraphs:
-                return {"answer": full_topic}
-            
-            best_p_idx = 0
-            if len(paragraphs) > 1:
-                p_vecs = vectorizer.transform(paragraphs)
-                q_vec = vectorizer.transform([search_query])
-                p_sims = cosine_similarity(q_vec, p_vecs)[0]
+            if best_score > 0.1 and best_item:
+                subj = best_item["subject"]
+                title = best_item["title"]
+                paras = best_item["paragraphs"]
                 
-                for i, p in enumerate(paragraphs):
-                    if search_query.lower() in p.lower():
-                        p_sims[i] += 5.0 
-                        
-                best_p_idx = p_sims.argmax()
+                summary = []
+                for p in paras:
+                    if not p.startswith(('-', '•')):
+                        first_sentence = p.split('.')[0] + "."
+                        summary.append(first_sentence)
+                    else:
+                        summary.append(p)
+                
+                res_text = f"📚 <b>Предмет:</b> {subj}\n📌 <b>Тема:</b> {title}\n\n<b>Головні тези:</b>\n\n"
+                res_text += "\n\n".join(summary[:5])
+                if len(summary) > 5:
+                    res_text += "\n\n<i>...тема містить більше інформації, запитай детальніше, якщо потрібно.</i>"
+                return {"answer": res_text}
 
-            if is_short:
-                target_p = paragraphs[best_p_idx]
-                first_sentence = target_p.split('.')[0] + "." if '.' in target_p else target_p
-                return {"answer": f"{title}\n\n{first_sentence}"}
-            elif is_long:
-                end_idx = min(len(paragraphs), best_p_idx + 3)
-                detailed_text = "\n\n".join(paragraphs[best_p_idx:end_idx])
-                if best_p_idx > 0:
-                    detailed_text = f"<i>(Фрагмент із середини розділу)</i>\n\n{detailed_text}"
-                return {"answer": f"{title}\n\n{detailed_text}"}
-            else:
-                end_idx = min(len(paragraphs), best_p_idx + 2)
-                preview = "\n\n".join(paragraphs[best_p_idx:end_idx])
-                if len(paragraphs) > end_idx:
-                    preview += "\n\n<i>...додай слово 'детально', щоб читати далі.</i>"
-                if best_p_idx > 0:
-                    preview = f"<i>(Фрагмент із середини розділу)</i>\n\n{preview}"
-                return {"answer": f"{title}\n\n{preview}"}
+        stop_words = r'(?i)\b(коротко|стисло|детально|розгорнуто|все про|що|таке|це|які|є|як|чому|навіщо|предмет|тема)\b'
+        search_query = re.sub(stop_words, '', q).strip()
+        if not search_query: search_query = q
+        
+        if topics_vectors is not None and len(corpus_texts) > 0:
+            query_vec = vectorizer.transform([search_query])
+            sims = cosine_similarity(query_vec, topics_vectors)[0]
+            
+            for i, text in enumerate(corpus_texts):
+                if search_query.lower() in text.lower():
+                    sims[i] += 2.0
+                    
+            best_idx = sims.argmax()
+            best_score = sims[best_idx]
+            
+            if best_score > 0.05:
+                meta = corpus_meta[best_idx]
+                item = db_data[meta["item_idx"]]
+                subj = item["subject"]
+                title = item["title"]
+                
+                header = f"📚 <b>{subj}</b>\n📌 <b>{title}</b>\n\n"
+                
+                if meta["type"] == "title":
+                    preview = "\n\n".join(item["paragraphs"][:2])
+                    return {"answer": header + preview + ("\n\n<i>...запитай детальніше, щоб читати далі.</i>" if len(item["paragraphs"]) > 2 else "")}
+                else:
+                    p_idx = meta["p_idx"]
+                    ans = item["paragraphs"][p_idx]
+                    if p_idx + 1 < len(item["paragraphs"]):
+                        ans += "\n\n" + item["paragraphs"][p_idx + 1]
+                    return {"answer": header + ans}
 
         try:
             results = DDGS().text(search_query, max_results=1)
@@ -196,7 +210,7 @@ def ask_question(data: dict):
         except Exception:
             pass
             
-        return {"answer": "Я не знайшла відповіді ні в конспекті, ні в інтернеті."}
+        return {"answer": "На жаль, я не знайшла цього у базі конспектів та інтернеті."}
         
     except Exception as e:
         return {"answer": f"Помилка ШІ: {str(e)}"}
