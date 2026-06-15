@@ -8,6 +8,7 @@ import io
 import os
 import re
 import pymongo
+import certifi
 
 app = FastAPI(title="Aishka Pro")
 
@@ -17,7 +18,7 @@ TEACHER_PASSWORD = "teacher" # Пароль для завантаження ко
 # Встав свій пароль замість <db_password> (без дужок < >)
 MONGO_URI = "mongodb+srv://rgbdf969_db_user:<1234qwer>@cluster0.wrhsfpw.mongodb.net/?appName=Cluster0"
 
-client = pymongo.MongoClient(MONGO_URI)
+client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client["aishka_database"]
 collection = db["topics"]
 
