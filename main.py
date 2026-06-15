@@ -16,7 +16,7 @@ TEACHER_PASSWORD = "teacher" # Пароль для завантаження ко
 
 # --- ПІДКЛЮЧЕННЯ ДО ХМАРНОЇ БАЗИ MONGODB ---
 # Встав свій пароль замість <db_password> (без дужок < >)
-MONGO_URI = "mongodb+srv://rgbdf969_db_user:<1234qwer>@cluster0.wrhsfpw.mongodb.net/?appName=Cluster0"
+MONGO_URI = "mongodb+srv://rgbdf969_db_user:1234qwer@cluster0.wrhsfpw.mongodb.net/?appName=Cluster0"
 
 client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client["aishka_database"]
